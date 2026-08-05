@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Тамагочи</title>
+<style>
+  :root {
+    --ink: #2E2A24;
+    --muted: #8A8073;
+    --line: #E2DACB;
+    --paper: #FBF7F0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main {
+    width: 420px;
+    padding: 24px;
+  }
+  /* Место существа. Пока пустой прямоугольник. */
+  .screen {
+    height: 260px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #fff;
+  }
+  .say {
+    min-height: 22px;
+    margin: 14px 2px 18px;
+    color: var(--muted);
+  }
+  .bar { margin-bottom: 12px; }
+  .bar-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .bar-track {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 100%;
+    background: var(--ink);
+    transition: width 400ms cubic-bezier(.22,.61,.36,1);
+  }
+  .buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 22px;
+  }
+  button {
+    flex: 1;
+    padding: 11px 0;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #fff;
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+    transition: transform 160ms cubic-bezier(.34,1.56,.64,1), border-color 160ms ease;
+  }
+  button:hover { border-color: var(--muted); }
+  button:active { transform: scale(.96); }
+</style>
+</head>
+<body>
+<main>
+  <div class="screen" id="screen"></div>
+
+  <p class="say" id="say"></p>
+
+  <div class="bar">
+    <div class="bar-head"><span>Сытость</span><span id="fed-value">70</span></div>
+    <div class="bar-track"><div class="bar-fill" id="fed-fill"></div></div>
+  </div>
+
+  <div class="bar">
+    <div class="bar-head"><span>Настроение</span><span id="mood-value">70</span></div>
+    <div class="bar-track"><div class="bar-fill" id="mood-fill"></div></div>
+  </div>
+
+  <div class="buttons">
+    <button id="btn-feed">Покормить</button>
+    <button id="btn-play">Поиграть</button>
+    <button id="btn-pet">Погладить</button>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+var STORAGE_KEY = 'tamagochi/state';
+var TICK_MS = 1000;
+
+var FED_DECAY_PER_MIN = 12;   // полная шкала пустеет за 8 мин 20 с
+var MOOD_DECAY_PER_MIN = 6;   // полная шкала пустеет за 16 мин 40 с
+
+var FULL_THRESHOLD = 97;      // выше этого — сыт, кормить нельзя. Отказ — редкость
+var FEED_FED_GAIN = 25;
+var FEED_MOOD_GAIN = 2;
+var REFUSE_MOOD_LOSS = 8;
+var PLAY_MOOD_GAIN = 15;
+var PLAY_FED_COST = 8;
+
+var MOOD_LOW = 35;            // ниже — хвост замирает, рот переворачивается
+var FED_LOW = 30;             // ниже — голова опускается, дыхание замедляется
+
+// Внешность. Логика сюда не смотрит, отсюда ничего не читает,
+// кроме одного места в render: CREATURES[state.creature].
+var CREATURES = {
+  cat: {
+    label: 'Кот',
+
+    palette: {
+      screen:   '#FAF2E6',
+      frame:    '#E8DCC8',
+      body:     '#F3B183',
+      belly:    '#FBE3CC',
+      blush:    '#F5A3A3',
+      ink:      '#4A3728',
+      whiskers: '#D9C3A8'
+    },
+
+    // Две линии рта. Переключаются подменой атрибута d, узел тот же.
+    mouth: {
+      neutral: 'M120 93 q -6 7 -12 1 M120 93 q 6 7 12 1',
+      low:     'M120 99 q -6 -7 -12 -1 M120 99 q 6 -7 12 -1'
+    },
+
+    // Логика передаёт имя события, текст живёт здесь.
+    lines: {
+      fed:     'Съел всё и сел ровно',
+      full:    'Отвернулся. Он сыт',
+      played:  'Догнал, отпустил, доволен',
+      petted:  'Прикрыл глаза и не двигается',
+      glance:  'Поднял взгляд',
+      call:    'Ходит вдоль края экрана'
+    },
+
+    // Монтируется один раз, в нейтральном виде. Дальше только react().
+    svg: function (state) {
+      var p = this.palette;
+      return '' +
+      '<svg viewBox="0 0 240 200" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="' + this.label + '">' +
+        '<style>' +
+          '.cat-breath { transform-box: fill-box; transform-origin: 50% 100%;' +
+          ' animation: cat-breath 4200ms cubic-bezier(.45,0,.55,1) infinite; }' +
+          '@keyframes cat-breath { 0%, 100% { transform: scale(1, 1); }' +
+          ' 50% { transform: scale(1.015, 1.03); } }' +
+
+          '.cat-tail { transform-box: view-box; transform-origin: 164px 152px;' +
+          ' animation: cat-tail 2600ms cubic-bezier(.45,0,.55,1) infinite; }' +
+          '@keyframes cat-tail { 0%, 100% { transform: rotate(-7deg); }' +
+          ' 50% { transform: rotate(7deg); } }' +
+
+          '.cat-head { transition: transform 900ms cubic-bezier(.22,.61,.36,1); }' +
+
+          // реакции: голодный и невесёлый
+          '.cat-breath.is-slow { animation-duration: 7000ms; }' +
+          '.cat-tail.is-still { animation-play-state: paused; }' +
+          '.cat-head.is-low { transform: translateY(3px); }' +
+
+          // одноразовые ответы на действие. Живут на отдельном узле,
+          // чтобы не спорить с постоянными реакциями на шкалы
+          '.cat-head-act { transform-box: view-box; transform-origin: 120px 116px; }' +
+          '.cat-head-act.is-refuse { animation: cat-refuse 500ms cubic-bezier(.34,1.2,.64,1); }' +
+          '@keyframes cat-refuse { 0%, 100% { transform: rotate(0deg); }' +
+          ' 45% { transform: rotate(-12deg); } }' +
+          '.cat-head-act.is-petted { animation: cat-nuzzle 1500ms cubic-bezier(.34,1.1,.64,1); }' +
+          '@keyframes cat-nuzzle { 0%, 100% { transform: rotate(0deg) translateY(0); }' +
+          ' 22% { transform: rotate(9deg) translateY(3px); }' +
+          ' 62% { transform: rotate(7deg) translateY(2px); } }' +
+
+          '.cat-heart { opacity: 0; transform-box: view-box; }' +
+          '.cat-hearts.is-petted .cat-heart { animation: cat-heart 1300ms cubic-bezier(.22,.61,.36,1); }' +
+          '.cat-hearts.is-petted .cat-heart-b { animation-delay: 200ms; }' +
+          '@keyframes cat-heart { 0% { opacity: 0; transform: translate(0, 0) scale(.6); }' +
+          ' 25% { opacity: .9; }' +
+          ' 100% { opacity: 0; transform: translate(7px, -34px) scale(1); } }' +
+        '</style>' +
+
+        // хвост
+        '<path class="cat-tail" d="M164 152 C 200 158 216 140 206 112" fill="none" stroke="' + p.body + '" stroke-width="13" stroke-linecap="round"/>' +
+
+        // корпус: дышит
+        '<g class="cat-breath">' +
+          '<ellipse cx="120" cy="140" rx="52" ry="42" fill="' + p.body + '"/>' +
+          '<ellipse cx="120" cy="152" rx="33" ry="27" fill="' + p.belly + '"/>' +
+        '</g>' +
+
+        '<g class="cat-head"><g class="cat-head-act">' +
+          // уши: под головой, чтобы основание пряталось
+          '<path d="M103 46 L84 65 L72 26 Z" fill="' + p.body + '"/>' +
+          '<path d="M95.5 46 L85 56 L78.5 35 Z" fill="' + p.blush + '"/>' +
+          '<path d="M137 46 L156 65 L168 26 Z" fill="' + p.body + '"/>' +
+          '<path d="M144.5 46 L155 56 L161.5 35 Z" fill="' + p.blush + '"/>' +
+
+          // голова
+          '<circle cx="120" cy="82" r="40" fill="' + p.body + '"/>' +
+
+          // усы
+          '<path d="M96 92 L64 86 M96 96 L62 96 M96 100 L64 106" fill="none" stroke="' + p.whiskers + '" stroke-width="2" stroke-linecap="round"/>' +
+          '<path d="M144 92 L176 86 M144 96 L178 96 M144 100 L176 106" fill="none" stroke="' + p.whiskers + '" stroke-width="2" stroke-linecap="round"/>' +
+
+          // щёки
+          '<ellipse cx="94" cy="95" rx="9" ry="5.5" fill="' + p.blush + '" opacity="0.75"/>' +
+          '<ellipse cx="146" cy="95" rx="9" ry="5.5" fill="' + p.blush + '" opacity="0.75"/>' +
+
+          // глаза: раскрытие не трогаем, это стадия «поднял взгляд»
+          '<ellipse cx="106" cy="80" rx="5.5" ry="6.5" fill="' + p.ink + '"/>' +
+          '<ellipse cx="134" cy="80" rx="5.5" ry="6.5" fill="' + p.ink + '"/>' +
+
+          // нос и рот
+          '<path d="M115 88 L125 88 L120 93 Z" fill="' + p.blush + '"/>' +
+          '<path class="cat-mouth" d="' + this.mouth.neutral + '" fill="none" stroke="' + p.ink + '" stroke-width="2" stroke-linecap="round"/>' +
+        '</g></g>' +
+
+        // сердечки: смонтированы сразу, прозрачные, ждут своего события
+        '<g class="cat-hearts">' +
+          '<path class="cat-heart cat-heart-a" d="M170 52 c -3 -4 -8 -1 -6 3 c 1 3 6 5 6 5 c 0 0 5 -2 6 -5 c 2 -4 -3 -7 -6 -3 z" fill="' + p.blush + '"/>' +
+          '<path class="cat-heart cat-heart-b" d="M186 68 c -2.5 -3 -6.5 -1 -5 2.5 c 1 2.5 5 4 5 4 c 0 0 4 -1.5 5 -4 c 1.5 -3.5 -2.5 -5.5 -5 -2.5 z" fill="' + p.blush + '"/>' +
+        '</g>' +
+      '</svg>';
+    },
+
+    // Мутация уже смонтированных узлов. Ни innerHTML, ни новых элементов.
+    react: function (root, flags) {
+      var tail = root.querySelector('.cat-tail');
+      var breath = root.querySelector('.cat-breath');
+      var head = root.querySelector('.cat-head');
+      var mouth = root.querySelector('.cat-mouth');
+      if (!tail || !breath || !head || !mouth) return;
+
+      // настроение
+      tail.classList.toggle('is-still', flags.lowMood);
+      var d = flags.lowMood ? this.mouth.low : this.mouth.neutral;
+      if (mouth.getAttribute('d') !== d) mouth.setAttribute('d', d);
+
+      // сытость
+      head.classList.toggle('is-low', flags.lowFed);
+      breath.classList.toggle('is-slow', flags.lowFed);
+    },
+
+    // Одноразовый ответ на событие. Не состояние: класс вешается,
+    // анимация доигрывает до нуля и оставляет узел как был.
+    pulse: function (root, event) {
+      var act = root.querySelector('.cat-head-act');
+      var hearts = root.querySelector('.cat-hearts');
+      if (!act || !hearts) return;
+
+      // снять всё, что могло остаться от прошлого события, и дать отрисовке
+      // заметить снятие — иначе повторный клик не перезапустит анимацию
+      act.classList.remove('is-refuse', 'is-petted');
+      hearts.classList.remove('is-petted');
+      void root.offsetWidth;
+
+      if (event === 'full') {
+        act.classList.add('is-refuse');
+      } else if (event === 'petted') {
+        act.classList.add('is-petted');
+        hearts.classList.add('is-petted');
+      }
+    }
+  }
+};
+
+// Плоское состояние. Ничего не знает о внешности.
+var state = {
+  fed: 70,                    // не полные: первое действие должно сработать
+  mood: 70,
+  lastSeen: Date.now(),
+  idle: 0,
+  stage: 0,
+  creature: 'cat'
+};
+
+function clamp(v) {
+  return Math.max(0, Math.min(100, v));
+}
+
+function decay(seconds) {
+  if (seconds <= 0) return;
+  state.fed = clamp(state.fed - FED_DECAY_PER_MIN / 60 * seconds);
+  state.mood = clamp(state.mood - MOOD_DECAY_PER_MIN / 60 * seconds);
+}
+
+function load() {
+  var raw = null;
+  try { raw = JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch (e) { raw = null; }
+  if (!raw) return;
+
+  if (typeof raw.fed === 'number') state.fed = clamp(raw.fed);
+  if (typeof raw.mood === 'number') state.mood = clamp(raw.mood);
+  if (typeof raw.lastSeen === 'number') state.lastSeen = raw.lastSeen;
+  if (typeof raw.creature === 'string') state.creature = raw.creature;
+
+  // Часы шли без пользователя: распад за пропущенное время — разом.
+  decay(Math.max(0, (Date.now() - state.lastSeen) / 1000));
+}
+
+function save() {
+  state.lastSeen = Date.now();
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+}
+
+// Реплику и короткий ответ под событие даёт существо,
+// логика знает только имя события.
+function say(event) {
+  var body = currentBody();
+  document.getElementById('say').textContent = body.lines[event] || '';
+  body.pulse(document.getElementById('screen'), event);
+}
+
+// Существо перерисовывается только при смене ключа, а не каждый тик:
+// иначе дыхание запускалось бы заново раз в секунду.
+var mountedCreature = null;
+
+function currentBody() {
+  return CREATURES[state.creature] || CREATURES.cat;
+}
+
+function renderCreature() {
+  if (mountedCreature === state.creature) return;
+
+  if (!CREATURES[state.creature]) {
+    console.warn('Нет существа с ключом "' + state.creature + '", показываю кота');
+  }
+  var body = currentBody();
+
+  var screen = document.getElementById('screen');
+  screen.style.background = body.palette.screen;
+  screen.style.borderColor = body.palette.frame;
+  screen.innerHTML = body.svg(state);
+
+  mountedCreature = state.creature;
+}
+
+// Пороги считает логика, существу достаются два флага.
+function renderReactions() {
+  currentBody().react(document.getElementById('screen'), {
+    lowMood: state.mood < MOOD_LOW,
+    lowFed: state.fed < FED_LOW
+  });
+}
+
+function render() {
+  renderCreature();
+  renderReactions();
+
+  var fed = Math.round(state.fed);
+  var mood = Math.round(state.mood);
+  document.getElementById('fed-value').textContent = fed;
+  document.getElementById('mood-value').textContent = mood;
+  document.getElementById('fed-fill').style.width = fed + '%';
+  document.getElementById('mood-fill').style.width = mood + '%';
+}
+
+function tick() {
+  decay(TICK_MS / 1000);
+  state.idle += TICK_MS / 1000;
+  save();
+  render();
+}
+
+function act() {
+  state.idle = 0;
+  save();
+  render();
+}
+
+document.getElementById('btn-feed').addEventListener('click', function () {
+  if (state.fed >= FULL_THRESHOLD) {
+    state.mood = clamp(state.mood - REFUSE_MOOD_LOSS);
+    say('full');
+  } else {
+    state.fed = clamp(state.fed + FEED_FED_GAIN);
+    state.mood = clamp(state.mood + FEED_MOOD_GAIN);
+    say('fed');
+  }
+  act();
+});
+
+document.getElementById('btn-play').addEventListener('click', function () {
+  state.mood = clamp(state.mood + PLAY_MOOD_GAIN);
+  state.fed = clamp(state.fed - PLAY_FED_COST);
+  say('played');
+  act();
+});
+
+// Ни одной шкалы не трогает. Только реакция.
+document.getElementById('btn-pet').addEventListener('click', function () {
+  say('petted');
+  act();
+});
+
+load();
+save();
+render();
+setInterval(tick, TICK_MS);
+</script>
+</body>
+</html>
