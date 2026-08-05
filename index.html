@@ -120,6 +120,12 @@ var PLAY_FED_COST = 8;
 var MOOD_LOW = 35;            // ниже — хвост замирает, рот переворачивается
 var FED_LOW = 30;             // ниже — голова опускается, дыхание замедляется
 
+// Лестница внимания: секунды простоя до каждой стадии.
+// 0 — тишина, 1 — только глаза, 2 — одно движение, 3 — заголовок вкладки.
+var GLANCE_AFTER = 20;
+var NUDGE_AFTER = 45;
+var TITLE_AFTER = 90;         // и только если вкладка неактивна. Дальше ничего
+
 // Внешность. Логика сюда не смотрит, отсюда ничего не читает,
 // кроме одного места в render: CREATURES[state.creature].
 var CREATURES = {
@@ -137,9 +143,10 @@ var CREATURES = {
     },
 
     // Две линии рта. Переключаются подменой атрибута d, узел тот же.
+    // low: углы уезжают вниз и наружу, середина остаётся наверху.
     mouth: {
       neutral: 'M120 93 q -6 7 -12 1 M120 93 q 6 7 12 1',
-      low:     'M120 99 q -6 -7 -12 -1 M120 99 q 6 -7 12 -1'
+      low:     'M120 97 q -8 0 -14 8 M120 97 q 8 0 14 8'
     },
 
     // Логика передаёт имя события, текст живёт здесь.
@@ -149,7 +156,8 @@ var CREATURES = {
       played:  'Догнал, отпустил, доволен',
       petted:  'Прикрыл глаза и не двигается',
       glance:  'Поднял взгляд',
-      call:    'Ходит вдоль края экрана'
+      call:    'Ткнулся носом в стекло',
+      tab:     'Кот ждёт'      // заголовок вкладки на стадии 3, не реплика на экране
     },
 
     // Монтируется один раз, в нейтральном виде. Дальше только react().
@@ -175,6 +183,15 @@ var CREATURES = {
           '.cat-tail.is-still { animation-play-state: paused; }' +
           '.cat-head.is-low { transform: translateY(3px); }' +
 
+          // плохое настроение: глаза в щели, рот уже подменён атрибутом d
+          '.cat-eyes.is-slit .cat-eye { transform: scale(1.18, 0.28); }' +
+
+          // голод: брови-скобки проявляются, уши уезжают назад и вниз
+          '.cat-brows { opacity: 0; transition: opacity 420ms ease; }' +
+          '.cat-brows.is-shown { opacity: 1; }' +
+          '.cat-ears.is-sag .cat-ear-l { transform: rotate(-28deg) scale(.94); }' +
+          '.cat-ears.is-sag .cat-ear-r { transform: rotate(28deg) scale(.94); }' +
+
           // одноразовые ответы на действие. Живут на отдельном узле,
           // чтобы не спорить с постоянными реакциями на шкалы
           '.cat-head-act { transform-box: view-box; transform-origin: 120px 116px; }' +
@@ -185,6 +202,33 @@ var CREATURES = {
           '@keyframes cat-nuzzle { 0%, 100% { transform: rotate(0deg) translateY(0); }' +
           ' 22% { transform: rotate(9deg) translateY(3px); }' +
           ' 62% { transform: rotate(7deg) translateY(2px); } }' +
+
+          // Лестница внимания. Стадия 1 — только голова: глаза и уши.
+          // Корпус, хвост и дыхание не трогаются, движения нет.
+          // Эти правила стоят ПОСЛЕ is-slit и is-sag намеренно: при равной
+          // силе побеждает последнее, и зов перебивает состояние. Голодный
+          // и грустный кот, подняв взгляд, раскрывает глаза и ставит уши —
+          // состояние в это время держат рот и брови.
+          '.cat-eye { transform-box: fill-box; transform-origin: 50% 50%;' +
+          ' transition: transform 420ms cubic-bezier(.34,1.3,.64,1); }' +
+          '.cat-eyes.is-glance .cat-eye { transform: scale(1.5, 1.7); }' +
+
+          // уши разворачиваются к зрителю: встают ближе к вертикали и шире
+          '.cat-ear { transform-box: view-box;' +
+          ' transition: transform 420ms cubic-bezier(.34,1.3,.64,1); }' +
+          '.cat-ear-l { transform-origin: 93.5px 55.5px; }' +
+          '.cat-ear-r { transform-origin: 146.5px 55.5px; }' +
+          '.cat-ears.is-glance .cat-ear-l { transform: rotate(9deg) scale(1.12); }' +
+          '.cat-ears.is-glance .cat-ear-r { transform: rotate(-9deg) scale(1.12); }' +
+
+          // стадия 2 — тычок в стекло. Цикл длинный: движение занимает
+          // первую треть секунды, дальше кот ждёт и пробует снова
+          '.cat-head-act.is-nudge { animation: cat-nudge 4200ms cubic-bezier(.34,1.2,.64,1) infinite; }' +
+          '@keyframes cat-nudge { 0% { transform: translateY(0) rotate(0deg); }' +
+          ' 9% { transform: translateY(11px) rotate(-13deg); }' +
+          ' 17% { transform: translateY(2px) rotate(-3deg); }' +
+          ' 24% { transform: translateY(7px) rotate(-9deg); }' +
+          ' 32%, 100% { transform: translateY(0) rotate(0deg); } }' +
 
           '.cat-heart { opacity: 0; transform-box: view-box; }' +
           '.cat-hearts.is-petted .cat-heart { animation: cat-heart 1300ms cubic-bezier(.22,.61,.36,1); }' +
@@ -204,11 +248,18 @@ var CREATURES = {
         '</g>' +
 
         '<g class="cat-head"><g class="cat-head-act">' +
-          // уши: под головой, чтобы основание пряталось
-          '<path d="M103 46 L84 65 L72 26 Z" fill="' + p.body + '"/>' +
-          '<path d="M95.5 46 L85 56 L78.5 35 Z" fill="' + p.blush + '"/>' +
-          '<path d="M137 46 L156 65 L168 26 Z" fill="' + p.body + '"/>' +
-          '<path d="M144.5 46 L155 56 L161.5 35 Z" fill="' + p.blush + '"/>' +
+          // уши: под головой, чтобы основание пряталось.
+          // Каждое вращается вокруг середины своего основания
+          '<g class="cat-ears">' +
+            '<g class="cat-ear cat-ear-l">' +
+              '<path d="M103 46 L84 65 L72 26 Z" fill="' + p.body + '"/>' +
+              '<path d="M95.5 46 L85 56 L78.5 35 Z" fill="' + p.blush + '"/>' +
+            '</g>' +
+            '<g class="cat-ear cat-ear-r">' +
+              '<path d="M137 46 L156 65 L168 26 Z" fill="' + p.body + '"/>' +
+              '<path d="M144.5 46 L155 56 L161.5 35 Z" fill="' + p.blush + '"/>' +
+            '</g>' +
+          '</g>' +
 
           // голова
           '<circle cx="120" cy="82" r="40" fill="' + p.body + '"/>' +
@@ -221,9 +272,17 @@ var CREATURES = {
           '<ellipse cx="94" cy="95" rx="9" ry="5.5" fill="' + p.blush + '" opacity="0.75"/>' +
           '<ellipse cx="146" cy="95" rx="9" ry="5.5" fill="' + p.blush + '" opacity="0.75"/>' +
 
-          // глаза: раскрытие не трогаем, это стадия «поднял взгляд»
-          '<ellipse cx="106" cy="80" rx="5.5" ry="6.5" fill="' + p.ink + '"/>' +
-          '<ellipse cx="134" cy="80" rx="5.5" ry="6.5" fill="' + p.ink + '"/>' +
+          // глаза: раскрываются на стадии «поднял взгляд», больше ничего не двигается
+          '<g class="cat-eyes">' +
+            '<ellipse class="cat-eye" cx="106" cy="80" rx="5.5" ry="6.5" fill="' + p.ink + '"/>' +
+            '<ellipse class="cat-eye" cx="134" cy="80" rx="5.5" ry="6.5" fill="' + p.ink + '"/>' +
+          '</g>' +
+
+          // брови: смонтированы сразу, прозрачные, ждут голода
+          '<g class="cat-brows">' +
+            '<path d="M96 69 q 10 -7 20 0" fill="none" stroke="' + p.ink + '" stroke-width="2.5" stroke-linecap="round"/>' +
+            '<path d="M124 69 q 10 -7 20 0" fill="none" stroke="' + p.ink + '" stroke-width="2.5" stroke-linecap="round"/>' +
+          '</g>' +
 
           // нос и рот
           '<path d="M115 88 L125 88 L120 93 Z" fill="' + p.blush + '"/>' +
@@ -244,16 +303,37 @@ var CREATURES = {
       var breath = root.querySelector('.cat-breath');
       var head = root.querySelector('.cat-head');
       var mouth = root.querySelector('.cat-mouth');
-      if (!tail || !breath || !head || !mouth) return;
+      var eyes = root.querySelector('.cat-eyes');
+      var ears = root.querySelector('.cat-ears');
+      var brows = root.querySelector('.cat-brows');
+      if (!tail || !breath || !head || !mouth || !eyes || !ears || !brows) return;
 
-      // настроение
+      // настроение: хвост, глаза, рот
       tail.classList.toggle('is-still', flags.lowMood);
+      eyes.classList.toggle('is-slit', flags.lowMood);
       var d = flags.lowMood ? this.mouth.low : this.mouth.neutral;
       if (mouth.getAttribute('d') !== d) mouth.setAttribute('d', d);
 
-      // сытость
+      // сытость: голова, дыхание, брови, уши
       head.classList.toggle('is-low', flags.lowFed);
       breath.classList.toggle('is-slow', flags.lowFed);
+      brows.classList.toggle('is-shown', flags.lowFed);
+      ears.classList.toggle('is-sag', flags.lowFed);
+    },
+
+    // Стадию считает логика, существо только решает, как её показать.
+    // 1 — глаза, 2 — одно движение при входе в стадию, 3 — на экране ничего.
+    // entered лестница по-прежнему передаёт, но коту он больше не нужен:
+    // тычок повторяется сам, пока держится стадия.
+    attend: function (root, stage, entered) {
+      var eyes = root.querySelector('.cat-eyes');
+      var ears = root.querySelector('.cat-ears');
+      var act = root.querySelector('.cat-head-act');
+      if (!eyes || !ears || !act) return;
+
+      eyes.classList.toggle('is-glance', stage >= 1);
+      ears.classList.toggle('is-glance', stage >= 1);
+      act.classList.toggle('is-nudge', stage >= 2);
     },
 
     // Одноразовый ответ на событие. Не состояние: класс вешается,
@@ -370,15 +450,63 @@ function render() {
   document.getElementById('mood-fill').style.width = mood + '%';
 }
 
+// Лестница внимания.
+// Простой считается по часам, а не по тикам: в неактивной вкладке
+// setInterval душат до раза в минуту, и накопление по тику врало бы в разы.
+var BASE_TITLE = document.title;
+var lastActive = Date.now();
+var lastTick = Date.now();    // распад тоже идёт по стенным часам, а не по числу тиков
+var ladderSpoke = false;      // последнюю реплику сказала лестница, а не игрок
+
+function stageFor(idle) {
+  if (idle >= TITLE_AFTER && document.hidden) return 3;
+  if (idle >= NUDGE_AFTER) return 2;
+  if (idle >= GLANCE_AFTER) return 1;
+  return 0;
+}
+
+function ladder() {
+  var next = stageFor(state.idle);
+
+  if (next !== state.stage) {
+    var entered = next > state.stage;
+    state.stage = next;
+
+    if (entered && next === 1) { say('glance'); ladderSpoke = true; }
+    if (entered && next === 2) { say('call'); ladderSpoke = true; }
+    if (next === 0 && ladderSpoke) {
+      document.getElementById('say').textContent = '';
+      ladderSpoke = false;
+    }
+
+    currentBody().attend(document.getElementById('screen'), next, entered);
+  }
+
+  // Стадия 3 — только заголовок. Ни звука, ни счётчика, ни бейджа.
+  var title = state.stage === 3 ? currentBody().lines.tab : BASE_TITLE;
+  if (document.title !== title) document.title = title;
+}
+
+// Человек занят — простой обнуляется, лестница падает на нулевую стадию.
+function busy() {
+  lastActive = Date.now();
+  if (state.idle === 0 && state.stage === 0) return;
+  state.idle = 0;
+  ladder();
+}
+
 function tick() {
-  decay(TICK_MS / 1000);
-  state.idle += TICK_MS / 1000;
+  var now = Date.now();
+  decay((now - lastTick) / 1000);
+  lastTick = now;
+  state.idle = (now - lastActive) / 1000;
   save();
   render();
+  ladder();
 }
 
 function act() {
-  state.idle = 0;
+  busy();
   save();
   render();
 }
@@ -407,6 +535,11 @@ document.getElementById('btn-pet').addEventListener('click', function () {
   say('petted');
   act();
 });
+
+document.addEventListener('mousemove', busy, { passive: true });
+document.addEventListener('keydown', busy);
+// Возврат во вкладку сам по себе простой не обнуляет, но третью стадию снимает.
+document.addEventListener('visibilitychange', ladder);
 
 load();
 save();
